@@ -1,0 +1,12 @@
+stream
+BT
+/F1 24 Tf
+100 700 Td
+(Relatório Financeiro: Primeiro Trimestre) Tj
+/F1 12 Tf
+0 -50 Td
+(Total de vendas: 1423 unidades) Tj
+0 -20 Td
+(Receita total: 158432.75 reais) Tj
+ET
+endstream
