@@ -8,6 +8,7 @@ import re
 from dataclasses import Field, dataclass
 from enum import StrEnum, auto
 from typing import Any, Callable, Self, TypeVar
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +85,7 @@ class Config:
         return cls(**config_map)
 
 
-@dataclass
+@dataclass(frozen=True)
 class Reference:
     id: int
     gen: int
@@ -97,6 +98,9 @@ class Obj:
     content: dict[str, Any]
     stream: memoryview | None
 
+    def ref(self) -> Reference:
+        return Reference(self.id, self.gen)
+
     def refs(self):
         to_search: list[Any] = [self.content]
         while to_search:
@@ -107,6 +111,9 @@ class Obj:
                 to_search.extend(curr)
             elif isinstance(curr, dict):
                 to_search.extend(curr.values())
+
+    def __getitem__(self, index):
+        return self.content.__getitem__(index)
 
 
 @dataclass
@@ -192,6 +199,31 @@ def integer(s: ParserContext) -> ParserResult[int]:
     return s, int(m.group())
 
 
+def integer_or_decimal(s: ParserContext) -> ParserResult[int | float]:
+    try:
+        s_i, i = integer(s)
+        int_success = True
+    except ParseError:
+        int_success = False
+    try:
+        s_d, d = decimal(s)
+        dec_success = True
+    except ParseError:
+        dec_success = False
+    match (int_success, dec_success):
+        case (False, False):
+            raise ParseError(s, name="numero inteiro ou decimal")
+        case (True, False):
+            return s_i, i
+        case (False, True):
+            return s_d, d
+        case _:
+            if len(s_i) == len(s_d):
+                return s_i, i
+            else:
+                return s_d, d
+
+
 def string(s: ParserContext) -> ParserResult[str]:
     s, m = pattern(rb"\(([^()]*)\)", "string delimitada por ()")(s)
     return s, m.group(1).decode()
@@ -222,7 +254,7 @@ whitespace_characters = b" \n\r\t"
 
 
 def whitespace0(s: ParserContext) -> ParserResult[int]:
-    s, m = pattern(rb"(?:\s*(?:%.*)?\s*)*", name="espaço")(s)
+    s, m = pattern(rb"(?:\s*(?:%.*)?)*", name="espaço")(s)
     return s, m.end()
 
 
@@ -332,8 +364,9 @@ def value(s: ParserContext) -> ParserResult[Any]:
     return alt(
         [
             reference,
-            decimal,
-            integer,
+            integer_or_decimal,
+            # decimal,
+            # integer,
             boolean,
             null,
             name,
@@ -415,10 +448,14 @@ def header(s: ParserContext) -> ParserResult[Header]:
     return s, Header(version_major=version_major, version_minor=version_minor)
 
 
+class StructureError(Exception): ...
+
+
 @dataclass
 class SimplePdf:
     header: Header
-    objs: list[Obj]
+    _catalog: Obj
+    objs: dict[Reference, Obj]
     xref: XRef
     trailer: Trailer
 
@@ -434,17 +471,73 @@ class SimplePdf:
             raise ParseError(e.context, "objeto ou xref")
         s, _ = whitespace1(s)
         s, trailer_ = trailer(s)
-        return cls(header=header_, objs=objs_, xref=xref_, trailer=trailer_)
 
-    def references(self):
-        for obj in self.objs:
+        catalog_ = next(
+            (obj for obj in objs_ if obj.content["Type"] == "Catalog"), None
+        )
+        if catalog_ is None:
+            raise StructureError("Objeto de tipo Catalog não foi encontrado")
+        objs = {Reference(obj.id, obj.gen): obj for obj in objs_}
+
+        return cls(
+            header=header_, _catalog=catalog_, objs=objs, xref=xref_, trailer=trailer_
+        )
+
+    def _references(self):
+        for obj in self.objs.values():
             yield from obj.refs()
 
-    def obj_map(self):
-        res = {}
-        for obj in self.objs:
-            res[(obj.id, obj.gen)] = obj
-        return res
+    def dangling_references(self) -> list[Reference]:
+        faulty_references = []
+        for ref in self._references():
+            if ref not in self.objs:
+                faulty_references.append(ref)
+        return faulty_references
+
+    def page_count(self) -> int:
+        pages_ref = self._catalog["Pages"]
+        return self.objs[pages_ref]["Count"]
+
+    def title(self) -> str:
+        metadata_ref = self._catalog["Metadata"]
+        return self.objs[metadata_ref]["Title"]
+
+    def author(self) -> str:
+        metadata_ref = self._catalog["Metadata"]
+        return self.objs[metadata_ref]["Author"]
+
+    def creation_date(self) -> datetime:
+        metadata_ref = self._catalog["Metadata"]
+        date_str: str = self.objs[metadata_ref]["CreationDate"]
+        return datetime.strptime(date_str, "D:%Y%m%d%H%M%S")
+
+
+def print_obj_tree(
+    objs: dict[Reference, Obj], obj: Obj, n0=1, indent=0, seen=None
+) -> int:
+    if seen is None:
+        seen = set()
+    if "Type" in obj.content:
+        obj_name = obj["Type"]
+    elif obj.stream is not None:
+        obj_name = "Content"
+    elif "Author" in obj.content:
+        obj_name = "Metadata"
+    else:
+        obj_name = "Outline"
+    if indent > 0:
+        dent = " " * (2 * indent - 1) + "+- "
+    else:
+        dent = ""
+    print(f"{dent}{obj.id}: {obj_name}", sep="")
+    seen.add(obj.ref())
+    to_visit = [ref for ref in obj.refs() if ref not in seen]
+    seen.update(to_visit)
+    for ref in reversed(to_visit):
+        n0 = (
+            print_obj_tree(objs, objs[ref], n0=n0 + 1, indent=indent + 1, seen=seen) + 1
+        )
+    return n0
 
 
 def analyse_simplepdf_file(config_filename: str, spdf_filename: str):
@@ -474,16 +567,10 @@ def analyse_simplepdf_file(config_filename: str, spdf_filename: str):
         print(f"Erro na linha {line}:\n{area}\n{parser_except}")
         exit(1)
 
-    references_ok = True
-    faulty_references = []
-    objs = simplepdf.obj_map()
-    for ref in simplepdf.references():
-        if (ref.id, ref.gen) not in objs:
-            references_ok = False
-            faulty_references.append(ref)
-    print(f"[{'OK' if references_ok else 'ERRO'}] Referências")
-    if faulty_references:
-        print(f"A referências {faulty_references} apontam para nada")
+    dangling_references = simplepdf.dangling_references()
+    print(f"[{'OK' if len(dangling_references) == 0 else 'ERRO'}] Referências")
+    if dangling_references:
+        print(f"A referências {dangling_references} apontam para nada")
 
     # i have no idea what to do with the xref table
     print("[OK] Tabela xref")
@@ -492,13 +579,24 @@ def analyse_simplepdf_file(config_filename: str, spdf_filename: str):
     print("ESTATÍSTICAS:")
     print("Total de objetos:", len(simplepdf.objs))
     obj_type_counts: dict[str, int] = defaultdict(int)
-    for obj in simplepdf.objs:
+    for obj in simplepdf.objs.values():
         if "Type" in obj.content:
             obj_type_counts[obj.content["Type"]] += 1
 
     print(
         "Objetos por tipo:", ", ".join(f"{k}={v}" for k, v in obj_type_counts.items())
     )
+    print("Total de páginas:", simplepdf.page_count())
+    print("Tamanho do documento:", len(file_content), "bytes")
+    print()
+    print("CONTEÚDO:")
+    print("Título:", simplepdf.title())
+    print("Autor:", simplepdf.author())
+    print("Data de criação:", simplepdf.creation_date())
+    print("Texto extraído:", "TODO")
+    print()
+    print("ÁRVORE DE OBJETOS:")
+    print_obj_tree(simplepdf.objs, simplepdf._catalog)
 
     # print(f"{simplepdf = }")
 
