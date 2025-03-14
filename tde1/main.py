@@ -6,16 +6,10 @@ from collections import defaultdict
 import logging
 import re
 from dataclasses import Field, dataclass
-from enum import StrEnum, auto
 from typing import Any, Callable, Self, TypeVar
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
-
-
-class NivelDetalhe(StrEnum):
-    baixo = auto()
-    completo = auto()
 
 
 @dataclass
@@ -24,9 +18,8 @@ class Config:
 
     extrair_texto: bool = True
     gerar_sumario: bool = True
-    detectar_ciclos: bool = True
-    nivel_detalhe: NivelDetalhe = NivelDetalhe.completo
-    validar_xref: bool = True
+    listar_objetos: bool = True
+    coordenadas_legiveis: bool = True
 
     line_pattern = re.compile(r"^\s*(?P<key>\w+)\s*=\s*(?P<value>\w+)\s*$")
 
@@ -44,8 +37,6 @@ class Config:
                 return False
             else:
                 raise ValueError(f"Expected sim/nao, got {value_str!r} ")
-        elif t is NivelDetalhe:
-            return NivelDetalhe(value_str)
         raise Exception(f"Unknown type {t}")
 
     @classmethod
@@ -92,11 +83,38 @@ class Reference:
 
 
 @dataclass
+class PageStream:
+    @dataclass
+    class TokenFont:
+        name: str
+        size: int
+
+    @dataclass
+    class TokenCoord:
+        x: int
+        y: int
+
+        def __repr__(self) -> str:
+            return f"Posição: {self.x}px da esquerda, {self.y}px do topo da página:"
+
+    @dataclass
+    class TokenText:
+        string: str
+
+    type PageStreamToken = TokenFont | TokenText | TokenCoord
+    tokens: list[PageStreamToken]
+
+
+type Stream = PageStream | memoryview
+
+
+@dataclass
 class Obj:
     id: int
     gen: int
     content: dict[str, Any]
-    stream: memoryview | None
+    stream: Stream | None
+    is_root: bool
 
     def ref(self) -> Reference:
         return Reference(self.id, self.gen)
@@ -111,6 +129,21 @@ class Obj:
                 to_search.extend(curr)
             elif isinstance(curr, dict):
                 to_search.extend(curr.values())
+
+    def type(self) -> str:
+        type_key = "Type"
+        if type_key in self.content:
+            obj_type = self.content[type_key]
+        elif self.stream is not None:
+            obj_type = "Content"
+        elif "Author" in self.content:
+            obj_type = "Metadata"
+        else:
+            obj_type = "Outline"
+        if self.is_root:
+            obj_type += " (Root)"
+
+        return obj_type
 
     def __getitem__(self, index):
         return self.content.__getitem__(index)
@@ -229,12 +262,6 @@ def string(s: ParserContext) -> ParserResult[str]:
     return s, m.group(1).decode()
 
 
-def stream(s: ParserContext) -> ParserResult[ParserContext]:
-    s, m = pattern(rb"stream\s*((?s:.*?))\s*endstream", "stream")(s)
-    start, end = m.span(1)
-    return s, s[start:end]
-
-
 def name(s: ParserContext) -> ParserResult[str]:
     s, m = pattern(rb"/(\w+)", "name")(s)
     return s, m.group(1).decode()
@@ -336,8 +363,8 @@ def pair(
     return p
 
 
-def alt(parsers: list[Parser], name: str | None = None) -> Parser[list]:
-    def p(s: ParserContext) -> ParserResult[list]:
+def alt(parsers: list[Parser], name: str | None = None) -> Parser:
+    def p(s: ParserContext) -> ParserResult:
         for parser in parsers:
             try:
                 s, m = parser(s)
@@ -398,6 +425,52 @@ array: Parser[list] = delimited(
 )
 
 
+def stream_token_text(s: ParserContext) -> ParserResult[PageStream.TokenText]:
+    s, text = string(s)
+    s, _ = whitespace1(s)
+    s, _ = pattern(rb"Tj")(s)
+    return s, PageStream.TokenText(text)
+
+
+def stream_token_font(s: ParserContext) -> ParserResult[PageStream.TokenFont]:
+    s, font_name = name(s)
+    s, _ = whitespace1(s)
+    s, size = integer(s)
+    s, _ = whitespace1(s)
+    s, _ = pattern(rb"Tf")(s)
+    return s, PageStream.TokenFont(font_name, size)
+
+
+def stream_token_coord(s: ParserContext) -> ParserResult[PageStream.TokenCoord]:
+    s, x = integer(s)
+    s, _ = whitespace1(s)
+    s, y = integer(s)
+    s, _ = whitespace1(s)
+    s, _ = pattern(rb"Td")(s)
+    return s, PageStream.TokenCoord(x, y)
+
+
+stream_token = alt([stream_token_text, stream_token_coord, stream_token_font])
+
+
+def page_stream(s: ParserContext) -> ParserResult[PageStream]:
+    s, _ = pattern(rb"BT\s+")(s)
+    s, tokens = separated_list1(stream_token)(s)
+    s, _ = pattern(rb"\s+ET")(s)
+    return s, PageStream(tokens)
+
+
+def stream(s: ParserContext) -> ParserResult[Stream]:
+    s_res, m = pattern(rb"stream\s*((?s:.*?))\s*endstream", "stream")(s)
+    start, end = m.span(1)
+    stream_content = s[start:end]
+    try:
+        _, page = page_stream(stream_content)
+        return s_res, page
+    except ParseError:
+        return s_res, stream_content
+
+
 def obj(s: ParserContext) -> ParserResult[Obj]:
     s, id = integer(s)
     s, _ = whitespace1(s)
@@ -409,7 +482,7 @@ def obj(s: ParserContext) -> ParserResult[Obj]:
     if stream_ is not None:
         s, _ = whitespace1(s)
     s, _ = pattern(rb"endobj", name="fechadura de objeto")(s)
-    return s, Obj(id=id, gen=gen, content=content_, stream=stream_)
+    return s, Obj(id=id, gen=gen, content=content_, stream=stream_, is_root=False)
 
 
 def xref_value(s: ParserContext) -> ParserResult[XRefValue]:
@@ -454,7 +527,7 @@ class StructureError(Exception): ...
 @dataclass
 class SimplePdf:
     header: Header
-    _catalog: Obj
+    _root: Obj
     objs: dict[Reference, Obj]
     xref: XRef
     trailer: Trailer
@@ -472,16 +545,15 @@ class SimplePdf:
         s, _ = whitespace1(s)
         s, trailer_ = trailer(s)
 
-        catalog_ = next(
-            (obj for obj in objs_ if obj.content["Type"] == "Catalog"), None
-        )
-        if catalog_ is None:
-            raise StructureError("Objeto de tipo Catalog não foi encontrado")
+        if "Root" not in trailer_.content:
+            raise StructureError("Trailer não possui Root")
         objs = {Reference(obj.id, obj.gen): obj for obj in objs_}
+        if trailer_.content["Root"] not in objs:
+            raise StructureError("Root aponta para objeto que não existe")
+        root_ = objs[trailer_.content["Root"]]
+        root_.is_root = True
 
-        return cls(
-            header=header_, _catalog=catalog_, objs=objs, xref=xref_, trailer=trailer_
-        )
+        return cls(header=header_, _root=root_, objs=objs, xref=xref_, trailer=trailer_)
 
     def _references(self):
         for obj in self.objs.values():
@@ -494,22 +566,76 @@ class SimplePdf:
                 faulty_references.append(ref)
         return faulty_references
 
+    def pages(self) -> Obj:
+        return self.objs[self._root["Pages"]]
+
     def page_count(self) -> int:
-        pages_ref = self._catalog["Pages"]
-        return self.objs[pages_ref]["Count"]
+        return self.pages()["Count"]
+
+    def page_objs(self):
+        return (self.objs[ref] for ref in self.pages()["Kids"])
+
+    def page_content_objs(self):
+        return (self.objs[page["Contents"]] for page in self.page_objs())
+
+    def page_streams(self):
+        return (
+            content.stream
+            for content in self.page_content_objs()
+            if isinstance(content.stream, PageStream)
+        )
+
+    def outlines(self) -> Obj:
+        return self.objs[self._root["Outlines"]]
+
+    def outline_objs(self):
+        curr = self.objs[self.outlines()["First"]]
+        while True:
+            yield curr
+            if "Next" not in curr.content:
+                break
+            curr = self.objs[curr.content["Next"]]
+
+    def metadata(self) -> Obj:
+        return self.objs[self._root["Metadata"]]
 
     def title(self) -> str:
-        metadata_ref = self._catalog["Metadata"]
-        return self.objs[metadata_ref]["Title"]
+        return self.metadata()["Title"]
 
     def author(self) -> str:
-        metadata_ref = self._catalog["Metadata"]
-        return self.objs[metadata_ref]["Author"]
+        return self.metadata()["Author"]
 
     def creation_date(self) -> datetime:
-        metadata_ref = self._catalog["Metadata"]
-        date_str: str = self.objs[metadata_ref]["CreationDate"]
+        date_str: str = self.metadata()["CreationDate"]
         return datetime.strptime(date_str, "D:%Y%m%d%H%M%S")
+
+    def check_structure(
+        self, obj: Obj | None = None, structure: dict[str, dict] | None = None
+    ):
+        if obj is None:
+            obj = self._root
+        if structure is None:
+            structure = {
+                "Pages": {"Page": {"Content": {}}},
+                "Metadata": {},
+                "Outlines": {"Outline": {}},
+            }
+        childs = [self.objs[ref] for ref in obj.refs()]
+        errors: list[StructureError] = []
+        for member in structure:
+            member_child = next((obj for obj in childs if obj.type() == member), None)
+            if member_child is None:
+                raise StructureError(
+                    f"Objeto de tipo {obj.type()} não possui filho de tipo {member}"
+                )
+            else:
+                try:
+                    self.check_structure(member_child, structure[member])
+                except StructureError as e:
+                    errors.append(e)
+
+        if errors:
+            raise StructureError("\n".join(str(res) for res in errors))
 
 
 def print_obj_tree(
@@ -517,18 +643,11 @@ def print_obj_tree(
 ) -> int:
     if seen is None:
         seen = set()
-    if "Type" in obj.content:
-        obj_name = obj["Type"]
-    elif obj.stream is not None:
-        obj_name = "Content"
-    elif "Author" in obj.content:
-        obj_name = "Metadata"
-    else:
-        obj_name = "Outline"
     if indent > 0:
         dent = " " * (2 * indent - 1) + "+- "
     else:
         dent = ""
+    obj_name = obj.type()
     print(f"{dent}{obj.id}: {obj_name}", sep="")
     seen.add(obj.ref())
     to_visit = [ref for ref in obj.refs() if ref not in seen]
@@ -553,19 +672,21 @@ def analyse_simplepdf_file(config_filename: str, spdf_filename: str):
 
     print()
     print("VALIDAÇÃO:")
-    parser_success = True
-    parser_except = None
     try:
         simplepdf = SimplePdf.from_memory(memory)
+        simplepdf.check_structure()
     except ParseError as e:
-        parser_success = False
-        parser_except = e
-    print(f"[{'OK' if parser_success else 'ERRO'}] Estrutura geral")
-    print(f"[{'OK' if parser_success else 'ERRO'}] Sintaxe de objetos")
-    if parser_except is not None:
-        line, area = parser_except.get_line()
-        print(f"Erro na linha {line}:\n{area}\n{parser_except}")
+        print("[ERRO] Sintaxe de objetos")
+        line, area = e.get_line()
+        print(f"Erro na linha {line}:\n{area}\n{e}")
         exit(1)
+    except StructureError as e:
+        print("[OK] Sintaxe de objetos")
+        print("[ERRO] Estrutura Geral")
+        print(e)
+        exit(1)
+    print("[OK] Sintaxe de objetos")
+    print("[OK] Estrutura Geral")
 
     dangling_references = simplepdf.dangling_references()
     print(f"[{'OK' if len(dangling_references) == 0 else 'ERRO'}] Referências")
@@ -573,7 +694,7 @@ def analyse_simplepdf_file(config_filename: str, spdf_filename: str):
         print(f"A referências {dangling_references} apontam para nada")
 
     # i have no idea what to do with the xref table
-    print("[OK] Tabela xref")
+    # print("[OK] Tabela xref")
 
     print()
     print("ESTATÍSTICAS:")
@@ -593,10 +714,26 @@ def analyse_simplepdf_file(config_filename: str, spdf_filename: str):
     print("Título:", simplepdf.title())
     print("Autor:", simplepdf.author())
     print("Data de criação:", simplepdf.creation_date())
-    print("Texto extraído:", "TODO")
+    if cfg.gerar_sumario:
+        print("Sumário:")
+        for outline in simplepdf.outline_objs():
+            print(f"\t{outline.content["Title"]}")
+    if cfg.extrair_texto:
+        print("Texto extraído:")
+        for i, p_stream in enumerate(simplepdf.page_streams()):
+            print(f"Página {i + 1}:")
+            last_coord: PageStream.TokenCoord | None = None
+            for token in p_stream.tokens:
+                if isinstance(token, PageStream.TokenText):
+                    if cfg.coordenadas_legiveis and last_coord is not None:
+                        print(f"\t{last_coord}")
+                    print(f"\t{token.string!r}")
+                if isinstance(token, PageStream.TokenCoord):
+                    last_coord = token
     print()
-    print("ÁRVORE DE OBJETOS:")
-    print_obj_tree(simplepdf.objs, simplepdf._catalog)
+    if cfg.listar_objetos:
+        print("ÁRVORE DE OBJETOS:")
+        print_obj_tree(simplepdf.objs, simplepdf._root)
 
     # print(f"{simplepdf = }")
 
