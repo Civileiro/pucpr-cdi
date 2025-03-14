@@ -692,6 +692,7 @@ def analyse_simplepdf_file(config_filename: str, spdf_filename: str):
     print(f"[{'OK' if len(dangling_references) == 0 else 'ERRO'}] Referências")
     if dangling_references:
         print(f"A referências {dangling_references} apontam para nada")
+        exit(1)
 
     # i have no idea what to do with the xref table
     # print("[OK] Tabela xref")

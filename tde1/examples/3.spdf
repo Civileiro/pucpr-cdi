@@ -39,21 +39,6 @@ endobj
 /FontDescriptor 10 0 R
 >>
 endobj
-6 0 obj
-<< /Length 175 >>
-stream
-BT
-/F1 24 Tf
-100 700 Td
-(Relatório Financeiro: Primeiro Trimestre) Tj
-/F1 12 Tf
-0 -50 Td
-(Total de vendas: 1423 unidades) Tj
-0 -20 Td
-(Receita total: 158432.75 reais) Tj
-ET
-endstream
-endobj
 7 0 obj
 << /Title (Relatório Financeiro Trimestral)
 /Author (Departamento Financeiro)
@@ -161,7 +146,7 @@ xref
 0000002052 00000 n
 trailer
 << /Size 15
-/Root 2 0 R
+/Root 1 0 R
 /Info 7 0 R
 >>
 startxref
