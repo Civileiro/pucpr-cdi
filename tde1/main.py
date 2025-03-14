@@ -679,12 +679,12 @@ def analyse_simplepdf_file(config_filename: str, spdf_filename: str):
         print("[ERRO] Sintaxe de objetos")
         line, area = e.get_line()
         print(f"Erro na linha {line}:\n{area}\n{e}")
-        exit(1)
+        return
     except StructureError as e:
         print("[OK] Sintaxe de objetos")
         print("[ERRO] Estrutura Geral")
         print(e)
-        exit(1)
+        return
     print("[OK] Sintaxe de objetos")
     print("[OK] Estrutura Geral")
 
@@ -692,7 +692,7 @@ def analyse_simplepdf_file(config_filename: str, spdf_filename: str):
     print(f"[{'OK' if len(dangling_references) == 0 else 'ERRO'}] Referências")
     if dangling_references:
         print(f"A referências {dangling_references} apontam para nada")
-        exit(1)
+        return
 
     # i have no idea what to do with the xref table
     # print("[OK] Tabela xref")
