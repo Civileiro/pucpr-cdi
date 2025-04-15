@@ -1,0 +1,14 @@
+13
+true24
+53true
+0x723
+asd82
+(a \neg 0)
+(9 \neg 0)
+(\neg true)
+(\wedge 0 1)
+(\vee true false)
+(\rightarrow 1a false)
+(\leftrightarrow (\neg 0) 1a)
+(\wedge (\vee 1 2) (\neg false))
+(\neg (\neg (\neg 0)))

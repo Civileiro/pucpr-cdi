@@ -20,7 +20,7 @@ def main(filename: str):
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         # print("USE: python main.py <FILE>")
-        filename = "exemplo.txt"
+        filename = "exemplo1.txt"
     else:
         filename = sys.argv[1]
     main(filename)

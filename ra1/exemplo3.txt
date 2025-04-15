@@ -1,18 +1,5 @@
-23
+10
 (\wedge 5asd (\vee (\neg false) true) )
-true
-false
-0
-1a2b
-(a \neg 0)
-(9 \neg 0)
-(\neg true)
-(\wedge 0 1)
-(\vee true false)
-(\rightarrow 1a false)
-(\leftrightarrow (\neg 0) 1a)
-(\wedge (\vee 1 2) (\neg false))
-(\neg (\neg (\neg 0)))
 (\vee (\wedge 1 2) (\vee 3 4))
 (\rightarrow (\neg 0) (\wedge 1 2))
 (\rightarrow (\neg (\vee (\wedge 1 2) (\vee 3 4))) (\wedge 1 2))

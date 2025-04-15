@@ -1,0 +1,10 @@
+8
+true
+false
+frue
+0
+1a2b
+a3g
+\neg
+()
+
