@@ -130,4 +130,4 @@ def validate(code: str, verbose: bool = False) -> bool:
 
 if __name__ == "__main__":
     code = r"(\wedge 5asd (\vee (\neg false) true) )"
-    validate(code)
+    validate(code, verbose=True)
