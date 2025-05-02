@@ -39,8 +39,6 @@
 # OPERADORBINARIO     ::= "\wedge" | "\vee" | "\rightarrow" | "\leftrightarrow"
 from __future__ import annotations
 
-from __future__ import annotations
-
 
 from tokenizer import tokenize
 from symbol import (
